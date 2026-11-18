@@ -1,14 +1,16 @@
 import { expandLesson, planLesson } from "../lesson";
 import { isFigureName } from "../lesson/figures";
+import { isSceneName, sceneOps, type SceneName } from "../lesson/scenes";
 import { makeLesson, narrationCues, scene, title } from "../lesson/geometry";
 import { SUBJECTS } from "../lesson/topics";
 import { INK, type ChartKind, type FigureName, type Lesson, type Op, type Step } from "../lesson/types";
 import { aiEnabled, aiJson } from "./llm";
 
 type AiVisual = {
-  type: "figure" | "chart" | "flow" | "table" | "venn" | "timeline" | "speech" | "formula";
+  type: "figure" | "chart" | "flow" | "table" | "venn" | "timeline" | "speech" | "formula" | "diagram";
   figure?: FigureName;
   chart?: ChartKind;
+  scene?: SceneName;
   labels?: string[];
   values?: number[];
   rows?: string[][];
@@ -44,8 +46,9 @@ const STEP_SCHEMA = `{
   "formula": "opcjonalny wzór lub kluczowa zależność, np. y = a·x + b (bez LaTeX-a)",
   "note": "opcjonalna rada albo typowy błąd (max 120 znaków)",
   "visual": {
-    "type": "figure | chart | flow | table | venn | timeline | speech | formula",
-    "figure": "tylko dla type=figure: person | teacher | student | pair | book | lightbulb | leaf | plant | cell | dna | atom | flask | molecule | magnet | clock | globe | mountain | sun | drop | heart | brain | balance | triangle | parabola | vector | pen | question | bolt | gear | star",
+    "type": "diagram | figure | chart | flow | table | venn | timeline | speech | formula",
+    "scene": "tylko dla type=diagram: pythagoras | newton | photosynthesis | atom | cell | water-cycle | circuit | parabola | incline | triangle-area",
+    "figure": "tylko dla type=figure: person | teacher | student | sitter | pair | book | lightbulb | leaf | plant | tree | apple | cloud | cell | dna | atom | flask | molecule | magnet | clock | globe | mountain | sun | drop | heart | brain | balance | triangle | parabola | vector | pen | question | bolt | gear | star",
     "chart": "tylko dla type=chart: bar | line | pie | area",
     "labels": ["dla flow: 2–4 etapy; dla chart: etykiety słupków; dla table: nagłówki kolumn; dla timeline: daty lub epoki; dla venn: nazwy zbiorów"],
     "values": [1, 4, 9],
@@ -65,12 +68,15 @@ const LESSON_SYSTEM = [
   "- narration jest czytane na głos: pisz pełnymi zdaniami, bez Markdownu, bez wzorów zapisanych znakami specjalnymi (zamiast √ napisz pierwiastek).",
   "- Tablica rysuje się w rytm narration: pierwsze zdanie zapowiada rysunek, kolejne zdania objaśniają poszczególne punkty. Dlatego kolejność punktów musi odpowiadać kolejności zdań.",
   "- Mów i pisz tym samym językiem: każdy punkt to skrót zdania z narration, a nie nowa, osobna treść. Nie wprowadzaj na tablicy pojęć, których nie ma w narration.",
-  "- bullets są rysowane: maksymalnie 85 znaków, bez kropki na końcu, mogą zawierać prosty wzór.",
+  "- Tablica ma tłumaczyć obrazem, nie przepisywać narration: maksymalnie 3 krótkie punkty, resztę unoszą rysunki, strzałki i podpisy w grafice.",
+  "- bullets są rysowane: maksymalnie 70 znaków, bez kropki na końcu, mogą zawierać prosty wzór.",
   "- W narration odwołuj się do tego, co uczeń widzi: „spójrz na wykres”, „ten schemat pokazuje”, ale nigdy nie opisuj elementu, którego nie ma w visual ani w bullets.",
   "- Nie wymyślaj danych, których nie znasz. Jeśli temat jest niejasny, przyjmij najbardziej prawdopodobną interpretację i zaznacz to w pierwszym kroku.",
   "- Zero treści obraźliwych, zero porad medycznych lub prawnych.",
   "",
   "Grafika (pole visual) — dobierz ją do treści kroku, żeby tablica nie wyglądała za każdym razem tak samo:",
+  "- diagram: najważniejszy wybór, gdy tłumaczysz mechanizm, twierdzenie albo proces. Tablica rysuje wtedy gotową ilustrację: pythagoras (twierdzenie Pitagorasa), newton (grawitacja, jabłko spadające na głowę), photosynthesis (fotosynteza), atom, cell (komórka), water-cycle (obieg wody), circuit (prąd), parabola (funkcja kwadratowa), incline (równia pochyła), triangle-area (pole trójkąta).",
+  "- Używaj diagrams w co najmniej połowie kroków, jeśli temat na to pozwala, i wybierz scenę najbliższą treści. Jeśli żadna nie pasuje, wybierz figure albo chart.",
   "- chart: gdy w kroku są liczby, proporcje albo porównanie wielkości.",
   "- flow: gdy opisujesz proces, cykl albo kolejne etapy.",
   "- table: gdy porównujesz dwie rzeczy (czasy, pojęcia, epoki).",
@@ -96,7 +102,17 @@ const LESSON_SYSTEM = [
 }`,
 ].join("\n");
 
-const VISUAL_TYPES = new Set(["figure", "chart", "flow", "table", "venn", "timeline", "speech", "formula"]);
+const VISUAL_TYPES = new Set([
+  "figure",
+  "chart",
+  "flow",
+  "table",
+  "venn",
+  "timeline",
+  "speech",
+  "formula",
+  "diagram",
+]);
 const CHART_KINDS = new Set<ChartKind>(["bar", "line", "pie", "area"]);
 
 function textList(value: unknown, max: number, maxLen = 34): string[] {
@@ -126,6 +142,7 @@ function validateVisual(value: unknown): AiVisual | undefined {
     type,
     figure: isFigureName(record.figure) ? record.figure : undefined,
     chart: CHART_KINDS.has(chartRaw) ? chartRaw : undefined,
+    scene: isSceneName(record.scene) ? record.scene : undefined,
     labels: textList(record.labels, 6, 34),
     values,
     rows: rows.length ? rows : undefined,
@@ -207,6 +224,25 @@ const SUBJECT_FIGURES: Record<string, FigureName[]> = {
 
 const PROCESS_HINTS = /\b(etap|krok|proces|cykl|faza|najpierw|następnie|potem|wreszcie|kolejno|na końcu)\b/i;
 
+/** Strong topic signals that deserve a full illustrated explanation, not a list. */
+const SCENE_HINTS: Array<[RegExp, SceneName]> = [
+  [/pitagoras|przeciwprostokąt|trójkąt prostokątny/i, "pythagoras"],
+  [/grawitac|newton|swobodn|spadając|ciążeni/i, "newton"],
+  [/fotosyntez|chlorofil/i, "photosynthesis"],
+  [/komórk/i, "cell"],
+  [/obieg wody|parowanie|skraplanie|\bopad/i, "water-cycle"],
+  [/prąd|obwód|napięci|opór elektry/i, "circuit"],
+  [/parabol|funkcja kwadratow|wierzchołek|miejsca zerowe|\bdelta\b/i, "parabola"],
+  [/równi|tarcie|siła wypadkowa/i, "incline"],
+  [/pole trójkąta|wysokość trójkąta/i, "triangle-area"],
+  [/atom|elektron|proton|izotop/i, "atom"],
+];
+
+function sceneFor(text: string): SceneName | undefined {
+  for (const [pattern, name] of SCENE_HINTS) if (pattern.test(text)) return name;
+  return undefined;
+}
+
 function subjectFigure(subject: string, index: number): FigureName {
   const pool = SUBJECT_FIGURES[subject] ?? SUBJECT_FIGURES.inne;
   return pool[index % pool.length];
@@ -243,6 +279,9 @@ function autoVisual(step: AiStep, subject: string, index: number): AiVisual {
   if (measured.values.length >= 3 && !step.formula) {
     return { type: "chart", chart: "bar", labels: measured.labels, values: measured.values };
   }
+
+  const sceneName = sceneFor(`${step.title} ${step.formula ?? ""} ${text}`);
+  if (sceneName) return { type: "diagram", scene: sceneName };
 
   if (subject === "historia" && bullets.length >= 3) {
     return {
@@ -409,8 +448,11 @@ function renderStep(step: AiStep, index: number, subject: string): Step {
   if (visual.type === "table" && (labels.length < 2 || !visual.rows?.length)) {
     visual = { type: "figure", figure: subjectFigure(subject, index) };
   }
+  if (visual.type === "diagram" && !visual.scene) {
+    visual = { type: "figure", figure: subjectFigure(subject, index) };
+  }
 
-  const bullets = step.bullets.slice(0, 4);
+  const bullets = step.bullets.slice(0, 3);
   // Draw on the narrator's clock: the diagram lands with the first explanation,
   // each point arrives with the sentence that explains it, the note closes the step.
   const cues = narrationCues(step.narration);
@@ -423,8 +465,34 @@ function renderStep(step: AiStep, index: number, subject: string): Step {
   const pointAt = at(2);
   const noteAt = Math.min(0.9, at(Math.max(0, cues.length - 1)) + 0.04);
   let bottom = 160;
+  let showNote = true;
 
   switch (visual.type) {
+    case "diagram": {
+      ops.push(...sceneOps(visual.scene ?? "pythagoras", 120, 92, color, diagramAt));
+      bottom = 528;
+      const short = bullets.slice(0, 2).map((text) => (text.length > 78 ? `${text.slice(0, 77)}…` : text));
+      short.forEach((text, i) => {
+        ops.push(
+          ...point(
+            150 + i * 390,
+            560,
+            text,
+            color,
+            17,
+            330,
+            Math.min(0.88, pointAt + i * 0.05),
+            keywordFigure(text),
+            120 + i * 390,
+          ),
+        );
+      });
+      if (short.length) {
+        showNote = false;
+        bottom = 700;
+      }
+      break;
+    }
     case "formula": {
       const formula = step.formula ?? bullets[0] ?? step.title;
       ops.push(...formulaBar(34, 96, 762, formula, diagramAt));
@@ -627,7 +695,7 @@ function renderStep(step: AiStep, index: number, subject: string): Step {
     }
   }
 
-  if (step.note) {
+  if (step.note && showNote) {
     const y = Math.min(Math.max(bottom + 18, 300), 592);
     ops.push(...noteBox(40, y, 840, step.note, noteAt));
   }

@@ -26,7 +26,7 @@ Data is created on first request in `.data/notara` (PGlite). Delete that folder 
 ### Whiteboard AI (`/whiteboard`)
 - Type any topic; the planner picks one of 19 authored topics or builds a generic lesson.
 - Every step is drawn on its own area of an infinite board; the camera follows the current step and keeps earlier steps visible.
-- The model writes words, local code draws: `figure` (30 hand-drawn illustrations), `chart` (bar/line/pie/area), `flow`, `table`, `venn`, `timeline`, `speech` and `formula` layouts. Each step gets a different composition, chosen from the content — a water drop, a cell, a molecule, a timeline of epochs, a quote bubble with a character.
+- The model writes words, local code draws: `diagram` scenes (Pythagorean squares, Newton's apple, photosynthesis, atom, cell, water cycle, circuit, parabola, inclined plane, triangle area), `figure` (34 hand-drawn illustrations), `chart` (bar/line/pie/area), `flow`, `table`, `venn`, `timeline`, `speech` and `formula` layouts. Each step gets a different composition, chosen from the content.
 - Drawing follows the narrator sentence by sentence: the diagram appears with the first explanation, each point lands when it is spoken, and concrete nouns get a small pictogram next to the point (water → drop, light → sun, energy → bolt).
 - Narration is synthesised locally with Supertonic (see below). Pause stops the voice and drawing; mute keeps drawing.
 - Pan/zoom, `Śledź` to snap back, step list, speed control, PDF export (print stylesheet), restart.
