@@ -1,5 +1,42 @@
 export type Align = "left" | "center" | "right";
 
+/** Hand-drawn illustrations the board can sketch, scaled into a square box. */
+export type FigureName =
+  | "person"
+  | "teacher"
+  | "student"
+  | "pair"
+  | "book"
+  | "lightbulb"
+  | "leaf"
+  | "plant"
+  | "cell"
+  | "dna"
+  | "atom"
+  | "flask"
+  | "molecule"
+  | "magnet"
+  | "clock"
+  | "globe"
+  | "mountain"
+  | "sun"
+  | "drop"
+  | "heart"
+  | "brain"
+  | "balance"
+  | "triangle"
+  | "parabola"
+  | "vector"
+  | "pen"
+  | "question"
+  | "bolt"
+  | "gear"
+  | "star";
+
+export type ChartKind = "bar" | "line" | "pie" | "area";
+
+export type Series = { label: string; value: number; color?: string };
+
 export type Op =
   | {
       k: "text";
@@ -118,6 +155,101 @@ export type Op =
       text: string;
       color?: string;
       bg?: string;
+      size?: number;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "figure";
+      name: FigureName;
+      x: number;
+      y: number;
+      size: number;
+      color?: string;
+      label?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "chart";
+      kind: ChartKind;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      data: Series[];
+      unit?: string;
+      caption?: string;
+      color?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "flow";
+      x: number;
+      y: number;
+      w: number;
+      nodes: string[];
+      dir?: "h" | "v";
+      color?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "venn";
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      sets: Array<{ label: string; color?: string }>;
+      overlap?: string;
+      caption?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "table";
+      x: number;
+      y: number;
+      w: number;
+      cols: string[];
+      rows: string[][];
+      color?: string;
+      caption?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "timeline";
+      x: number;
+      y: number;
+      w: number;
+      items: Array<{ label: string; text?: string }>;
+      color?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "speech";
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      text: string;
+      who?: string;
+      color?: string;
+      bg?: string;
+      at?: number;
+      dur?: number;
+    }
+  | {
+      k: "callout";
+      x: number;
+      y: number;
+      tx: number;
+      ty: number;
+      text: string;
+      color?: string;
       size?: number;
       at?: number;
       dur?: number;

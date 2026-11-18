@@ -173,7 +173,16 @@ export function translateOp(op: Op, dx: number, dy: number): Op {
     case "highlight":
     case "pill":
     case "axes":
+    case "figure":
+    case "chart":
+    case "flow":
+    case "venn":
+    case "table":
+    case "timeline":
+    case "speech":
       return { ...op, x: op.x + dx, y: op.y + dy };
+    case "callout":
+      return { ...op, x: op.x + dx, y: op.y + dy, tx: op.tx + dx, ty: op.ty + dy };
     case "line":
     case "arrow":
       return { ...op, x1: op.x1 + dx, y1: op.y1 + dy, x2: op.x2 + dx, y2: op.y2 + dy };
@@ -206,6 +215,33 @@ export function speechMs(text: string): number {
   const chars = text.replace(/\s+/g, " ").trim().length;
   return Math.max(3200, Math.round((chars / 14.2) * 1000) + 900);
 }
+
+export type Cue = { text: string; at: number };
+
+/**
+ * Splits narration into sentences and maps each one onto its share of the
+ * spoken timeline (0..1). The board uses the same map to reveal drawings, and
+ * the player uses it for live captions, so the picture and the voice agree.
+ */
+export function narrationCues(narration: string): Cue[] {
+  const clean = narration.replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const sentences = (clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [])
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  if (sentences.length <= 1) return [{ text: clean, at: 0 }];
+
+  // Longer sentences take longer to say; the constant covers the pause after each one.
+  const weights = sentences.map((sentence) => sentence.length + 14);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let elapsed = 0;
+  return sentences.map((text, i) => {
+    const cue = { text, at: elapsed / total };
+    elapsed += weights[i];
+    return cue;
+  });
+}
+
 
 export function scene(index: number) {
   const col = index % 2;

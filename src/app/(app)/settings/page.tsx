@@ -3,8 +3,10 @@ import { requireUser } from "@/lib/auth";
 import { logoutAction, updatePersonaAction, updateProfileAction } from "@/lib/actions";
 import { PLANS, usageCount, whiteboardRemaining, type PlanKey } from "@/lib/points";
 import { aiModel } from "@/lib/ai";
+import { TTS_MODEL_NAME, TTS_MODEL_REPO, ttsAssetsPresent } from "@/lib/tts/status";
 import { q } from "@/lib/db";
 import { Avatar } from "@/components/avatar";
+import { VoicePicker } from "@/components/voice-picker";
 import { CheckIcon, SettingsIcon, SparkIcon, TrophyIcon } from "@/components/icons";
 import { level } from "@/lib/utils";
 
@@ -27,6 +29,7 @@ export default async function SettingsPage() {
   const xp = level(user.xp);
   const plan = PLANS[(user.plan as PlanKey) ?? "free"] ?? PLANS.free;
   const model = aiModel();
+  const narratorReady = ttsAssetsPresent();
 
   return (
     <div className="page">
@@ -244,6 +247,26 @@ export default async function SettingsPage() {
           </section>
 
           <section className="card-soft">
+            <div className="between" style={{ marginBottom: 6 }}>
+              <span className="label">Lektor tablicy</span>
+              <span className={`chip ${narratorReady ? "chip-green" : "chip-solid"}`} style={{ fontSize: 11 }}>
+                {narratorReady ? "offline · 44,1 kHz" : "brak modelu"}
+              </span>
+            </div>
+            <code style={{ display: "block", fontSize: 11.5, lineHeight: 1.5, color: "var(--ink)" }}>
+              {TTS_MODEL_NAME}
+            </code>
+            <p className="small" style={{ margin: "6px 0 0" }}>
+              Czyta każdy krok lekcji po polsku. Model działa lokalnie na procesorze — nagranie powstaje na Twoim
+              komputerze, bez chmury i bez GPU.
+            </p>
+            <VoicePicker ready={narratorReady} />
+            <p className="small" style={{ margin: "8px 0 0" }}>
+              Wagi: <code>{TTS_MODEL_REPO}</code> · licencja MIT
+            </p>
+          </section>
+
+          <section className="card-soft">
             <span className="label">Konto</span>
             <div className="stack" style={{ gap: 6, marginTop: 8 }}>
               <div className="between">
@@ -279,6 +302,10 @@ export default async function SettingsPage() {
             </p>
             <p className="small">
               Możesz podłączyć Supabase, żeby korzystać z tych samych danych na innych urządzeniach.
+            </p>
+            <p className="small">
+              Lektor (Supertonic 3) renderuje mowę lokalnie — gotowe nagrania leżą w <code>.data/tts</code> i nigdy nie
+              opuszczają tego komputera.
             </p>
           </section>
 

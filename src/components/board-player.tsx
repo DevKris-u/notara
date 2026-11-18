@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { Lesson } from "@/lib/lesson/types";
 import { drawBoard } from "@/lib/lesson/render";
+import { clipUrl, narrationClip, storedVoice, type Clip } from "@/lib/tts/client";
 import {
   ChevronLeft,
   ChevronRight,
@@ -19,8 +20,15 @@ import {
 } from "@/components/icons";
 
 type Camera = { x: number; y: number; scale: number };
+type LektorState = "idle" | "loading" | "ready" | "off";
 
 const DEFAULT_CAMERA: Camera = { x: 500, y: 380, scale: 0.8 };
+
+/** How long the board waits for the narrator before drawing on without it. */
+const LEKTOR_TIMEOUT_MS = 30000;
+
+/** Breathing room between steps so the last syllable is never clipped. */
+const STEP_GAP_MS = 420;
 
 function focusCamera(focus: { x: number; y: number; w: number; h: number }, view: { w: number; h: number }): Camera {
   const pad = 110;
@@ -51,6 +59,8 @@ export function BoardPlayer({
   const [speed, setSpeed] = useState(1);
   const [ended, setEnded] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [lektor, setLektor] = useState<LektorState>("idle");
+  const [durations, setDurations] = useState<Record<number, number>>({});
 
   const stepRef = useRef(step);
   const playingRef = useRef(playing);
@@ -58,6 +68,12 @@ export function BoardPlayer({
   const followRef = useRef(follow);
   const speedRef = useRef(speed);
   const timeRef = useRef(0);
+  const holdRef = useRef(false);
+  const stepDurRef = useRef(lesson.steps[Math.min(initialStep, lesson.steps.length - 1)]?.durMs ?? 6000);
+  const clipsRef = useRef(new Map<number, Clip>());
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
+  const prepTokenRef = useRef(0);
   const camRef = useRef<Camera>({ ...DEFAULT_CAMERA });
   const targetRef = useRef<Camera>({ ...DEFAULT_CAMERA });
   const viewRef = useRef({ w: 900, h: 540 });
@@ -65,10 +81,13 @@ export function BoardPlayer({
   const fontsRef = useRef({ hand: '"Caveat", cursive', sans: 'system-ui, sans-serif' });
   const lastRef = useRef(0);
 
-  const totalMs = useMemo(() => lesson.steps.reduce((sum, s) => sum + s.durMs, 0), [lesson.steps]);
+  const totalMs = useMemo(
+    () => lesson.steps.reduce((sum, s, index) => sum + (durations[index] ?? s.durMs), 0),
+    [lesson.steps, durations],
+  );
   const doneMs = useMemo(
-    () => lesson.steps.slice(0, step).reduce((sum, s) => sum + s.durMs, 0) + elapsed,
-    [lesson.steps, step, elapsed],
+    () => lesson.steps.slice(0, step).reduce((sum, s, index) => sum + (durations[index] ?? s.durMs), 0) + elapsed,
+    [lesson.steps, durations, step, elapsed],
   );
 
   useEffect(() => {
@@ -87,27 +106,161 @@ export function BoardPlayer({
     speedRef.current = speed;
   }, [speed]);
 
+  /* ------------------------------------------------------------- narrator -- */
+
   const cancelSpeech = useCallback(() => {
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
   }, []);
 
-  const speak = useCallback(
+  /** Last resort when Supertonic is unavailable: the browser's own Polish voice. */
+  const speakFallback = useCallback(
     (text: string) => {
       if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
       window.speechSynthesis.cancel();
       if (mutedRef.current || !text) return;
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = "pl-PL";
-      utterance.rate = 1.02 * speedRef.current;
+      utterance.rate = 0.82 * speedRef.current;
       utterance.pitch = 1;
-      const voices = window.speechSynthesis.getVoices();
-      const polish = voices.find((v) => v.lang.toLowerCase().startsWith("pl"));
+      const polish = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith("pl"));
       if (polish) utterance.voice = polish;
       window.speechSynthesis.speak(utterance);
     },
     [],
+  );
+
+  const stopAudio = useCallback(() => {
+    const audio = audioRef.current;
+    audioRef.current = null;
+    if (audio) {
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+  }, []);
+
+  const startAudio = useCallback(
+    (clip: Clip, narration = "") => {
+      // Only one voice may speak: stop the browser fallback before Supertonic starts.
+      cancelSpeech();
+      stopAudio();
+      const url = clipUrl(clip);
+      audioUrlRef.current = url;
+
+      const audio = new Audio();
+      audio.preload = "auto";
+      audio.preservesPitch = true;
+      audio.playbackRate = speedRef.current;
+      audio.src = url;
+      audioRef.current = audio;
+
+      // Keep the element parked at the drawing's position, even while muted or
+      // paused, so resuming never restarts the sentence from the beginning.
+      const seek = () => {
+        const resumeAt = timeRef.current / 1000;
+        if (resumeAt <= 0.08) return;
+        try {
+          audio.currentTime = resumeAt;
+        } catch {
+          /* metadata not ready yet — loadedmetadata fires this again */
+        }
+      };
+      audio.addEventListener("loadedmetadata", seek, { once: true });
+      seek();
+
+      audio.addEventListener("error", () => {
+        if (audioRef.current !== audio) return;
+        console.warn("[tts] playback failed", audio.error?.code ?? "unknown");
+        if (mutedRef.current || !playingRef.current) return;
+        // A damaged or missing clip should not leave the step silent.
+        stopAudio();
+        speakFallback(narration);
+      });
+
+      if (mutedRef.current || !playingRef.current) return;
+
+      void audio.play().catch((error) => {
+        console.warn("[tts] playback blocked", error);
+      });
+    },
+    [cancelSpeech, speakFallback, stopAudio],
+  );
+
+  const ensureClip = useCallback(
+    async (index: number): Promise<Clip | null> => {
+      const current = lesson.steps[index];
+      if (!current?.narration) return null;
+      const hit = clipsRef.current.get(index);
+      if (hit) return hit;
+
+      const clip = await narrationClip(current.narration, storedVoice());
+      if (!clip) return null;
+
+      clipsRef.current.set(index, clip);
+      setDurations((prev) =>
+        prev[index] === clip.durationMs ? prev : { ...prev, [index]: Math.round(clip.durationMs) },
+      );
+      return clip;
+    },
+    [lesson.steps],
+  );
+
+  const resolveStep = useCallback(
+    async (index: number) => {
+      const current = lesson.steps[index];
+      if (!current) return;
+      const token = ++prepTokenRef.current;
+
+      holdRef.current = true;
+      setLektor("loading");
+
+      const pending = ensureClip(index);
+
+      // Wait for the clip, but never leave the board frozen forever. When the
+      // wait runs out we keep drawing silently — the alternative, handing the
+      // step to the browser's own voice, is how two narrators ended up talking
+      // over each other at two different speeds.
+      const outcome = await Promise.race([
+        pending.then((clip) => ({ clip })),
+        new Promise<{ late: true }>((resolve) => {
+          window.setTimeout(() => resolve({ late: true }), LEKTOR_TIMEOUT_MS);
+        }),
+      ]);
+      if (token !== prepTokenRef.current) return;
+
+      if ("late" in outcome) {
+        stepDurRef.current = current.durMs;
+        holdRef.current = false;
+        setLektor("loading");
+        void pending.then((clip) => {
+          if (!clip || token !== prepTokenRef.current) return;
+          stepDurRef.current = Math.max(stepDurRef.current, clip.durationMs);
+          setLektor("ready");
+          startAudio(clip, current.narration);
+        });
+        return;
+      }
+
+      const clip = outcome.clip;
+      if (clip) {
+        stepDurRef.current = clip.durationMs;
+        setLektor("ready");
+        startAudio(clip, current.narration);
+      } else {
+        stepDurRef.current = current.durMs;
+        setLektor("off");
+        if (!mutedRef.current) speakFallback(current.narration);
+      }
+      holdRef.current = false;
+    },
+    [ensureClip, lesson.steps, speakFallback, startAudio],
   );
 
   const focusStep = useCallback(
@@ -122,20 +275,19 @@ export function BoardPlayer({
   const goToStep = useCallback(
     (index: number, keepPlaying = true) => {
       const next = Math.max(0, Math.min(lesson.steps.length - 1, index));
+      cancelSpeech();
+      stopAudio();
       stepRef.current = next;
       setStep(next);
       timeRef.current = 0;
       setElapsed(0);
       setEnded(false);
       if (followRef.current) focusStep(next);
-      cancelSpeech();
-      if (keepPlaying) {
-        playingRef.current = true;
-        setPlaying(true);
-        speak(lesson.steps[next].narration);
-      }
+      playingRef.current = keepPlaying;
+      setPlaying(keepPlaying);
+      if (keepPlaying) void resolveStep(next);
     },
-    [cancelSpeech, focusStep, lesson.steps, speak],
+    [cancelSpeech, focusStep, lesson.steps.length, resolveStep, stopAudio],
   );
 
   /* ---------------- resize ---------------- */
@@ -181,7 +333,7 @@ export function BoardPlayer({
     }
   }, [lesson.steps]);
 
-  /* ---------------- speech voices ---------------- */
+  /* ---------------- browser speech voices ---------------- */
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const load = () => window.speechSynthesis.getVoices();
@@ -190,14 +342,62 @@ export function BoardPlayer({
     return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
-  /* ---------------- gate: start speaking on first play ---------------- */
+  /* ---------------- prefetch narration, starting at the current step ---------------- */
   useEffect(() => {
-    if (playing && !muted) {
-      speak(lesson.steps[stepRef.current]?.narration ?? "");
+    let cancelled = false;
+    const start = stepRef.current;
+    const order: number[] = [];
+    for (let index = start; index < lesson.steps.length; index++) order.push(index);
+    for (let index = 0; index < start; index++) order.push(index);
+
+    const run = async () => {
+      for (const index of order) {
+        if (cancelled) return;
+        await ensureClip(index);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureClip, lesson.steps.length]);
+
+  /* ---------------- first play / resume ---------------- */
+  useEffect(() => {
+    if (!playing) {
+      cancelSpeech();
+      return;
     }
+    const audio = audioRef.current;
+    if (audio) {
+      // Resuming must continue the sentence, not restart it.
+      try {
+        audio.currentTime = timeRef.current / 1000;
+      } catch {
+        /* metadata not ready yet */
+      }
+      void audio.play().catch(() => undefined);
+      return;
+    }
+    void resolveStep(stepRef.current);
     return () => cancelSpeech();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, muted]);
+  }, [playing]);
+
+  /* ---------------- tempo also drives audio playback ---------------- */
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (audio) audio.playbackRate = speed;
+  }, [speed]);
+
+  /* ---------------- unmount ---------------- */
+  useEffect(
+    () => () => {
+      stopAudio();
+      cancelSpeech();
+    },
+    [cancelSpeech, stopAudio],
+  );
 
   /* ---------------- animation loop ---------------- */
   useEffect(() => {
@@ -217,21 +417,33 @@ export function BoardPlayer({
       const current = lesson.steps[index];
       if (!current) return;
 
-      if (playingRef.current) {
-        timeRef.current += dt * speedRef.current;
-        if (timeRef.current >= current.durMs) {
+      if (playingRef.current && !holdRef.current) {
+        const audio = audioRef.current;
+        if (audio && !audio.paused && !audio.ended && audio.readyState >= 2) {
+          // The audio clock is the master, so the drawing and the voice cannot drift apart.
+          timeRef.current = audio.currentTime * 1000;
+        } else {
+          timeRef.current += dt * speedRef.current;
+        }
+
+        if (timeRef.current >= stepDurRef.current + STEP_GAP_MS) {
           if (index < lesson.steps.length - 1) {
             timeRef.current = 0;
             stepRef.current = index + 1;
             setStep(index + 1);
             setElapsed(0);
             if (followRef.current) focusStep(index + 1);
-            speak(lesson.steps[index + 1].narration);
+            holdRef.current = true;
+            cancelSpeech();
+            stopAudio();
+            void resolveStep(index + 1);
           } else {
-            timeRef.current = current.durMs;
+            timeRef.current = stepDurRef.current;
             playingRef.current = false;
             setPlaying(false);
             setEnded(true);
+            cancelSpeech();
+            stopAudio();
           }
         }
         uiClock += dt;
@@ -278,18 +490,19 @@ export function BoardPlayer({
         dpr * (h / 2 - cam.y * cam.scale),
       );
 
+      const dur = stepDurRef.current;
       drawBoard(
         ctx,
         lesson.steps.map((s) => s.ops),
         index,
-        Math.min(timeRef.current, current.durMs),
-        current.durMs,
+        Math.min(timeRef.current, dur),
+        dur,
         { hand: fontsRef.current.hand, sans: fontsRef.current.sans },
       );
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [lesson.steps, focusStep, speak]);
+  }, [lesson.steps, cancelSpeech, focusStep, resolveStep, stopAudio]);
 
   /* ---------------- interactions ---------------- */
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -342,12 +555,28 @@ export function BoardPlayer({
 
   const togglePlay = () => {
     const next = !playingRef.current;
-    playingRef.current = next;
-    setPlaying(next);
-    if (!next) cancelSpeech();
+    if (!next) {
+      audioRef.current?.pause();
+      cancelSpeech();
+    }
     if (next && ended) {
       timeRef.current = 0;
+      setElapsed(0);
       setEnded(false);
+      stopAudio();
+    }
+    playingRef.current = next;
+    setPlaying(next);
+    if (next) {
+      const audio = audioRef.current;
+      if (audio) {
+        try {
+          audio.currentTime = timeRef.current / 1000;
+        } catch {
+          /* metadata not ready yet */
+        }
+        void audio.play().catch(() => undefined);
+      }
     }
   };
 
@@ -355,12 +584,32 @@ export function BoardPlayer({
     const next = !mutedRef.current;
     mutedRef.current = next;
     setMuted(next);
-    if (next) cancelSpeech();
-    else if (playingRef.current) speak(lesson.steps[stepRef.current]?.narration ?? "");
+    if (next) {
+      cancelSpeech();
+      audioRef.current?.pause();
+      return;
+    }
+    const audio = audioRef.current;
+    if (audio) {
+      audio.currentTime = timeRef.current / 1000;
+      void audio.play().catch(() => undefined);
+      return;
+    }
+    void ensureClip(stepRef.current).then((clip) => {
+      if (clip) {
+        stepDurRef.current = Math.max(stepDurRef.current, clip.durationMs);
+        startAudio(clip, lesson.steps[stepRef.current]?.narration ?? "");
+      } else if (playingRef.current) {
+        speakFallback(lesson.steps[stepRef.current]?.narration ?? "");
+      }
+    });
   };
 
   const restart = () => {
     cancelSpeech();
+    stopAudio();
+    followRef.current = true;
+    setFollow(true);
     stepRef.current = 0;
     setStep(0);
     timeRef.current = 0;
@@ -368,10 +617,8 @@ export function BoardPlayer({
     setEnded(false);
     playingRef.current = true;
     setPlaying(true);
-    followRef.current = true;
-    setFollow(true);
     focusStep(0);
-    speak(lesson.steps[0].narration);
+    void resolveStep(0);
   };
 
   const progress = Math.min(100, Math.round((doneMs / Math.max(1, totalMs)) * 100));
@@ -395,7 +642,13 @@ export function BoardPlayer({
             {playing ? <PauseIcon width={14} height={14} /> : <PlayIcon width={14} height={14} />}
             {playing ? "Pauza" : ended ? "Powtórz" : "Odtwórz"}
           </button>
-          <button type="button" className="wb-tool" onClick={toggleMute} data-on={!muted} title="Głos asystenta">
+          <button
+            type="button"
+            className="wb-tool"
+            onClick={toggleMute}
+            data-on={!muted}
+            title={muted ? "Włącz lektora" : "Wycisz lektora"}
+          >
             {muted ? <MuteIcon width={14} height={14} /> : <VolumeIcon width={14} height={14} />}
             {muted ? "Wycisz." : "Głos"}
           </button>
@@ -442,6 +695,15 @@ export function BoardPlayer({
           <div className="progress" style={{ flex: 1, background: "rgba(255,253,248,.8)" }}>
             <span style={{ width: `${progress}%` }} />
           </div>
+          {lektor === "loading" ? (
+            <span className="chip" style={{ background: "rgba(255,253,248,.94)" }}>
+              Lektor pisze…
+            </span>
+          ) : lektor === "off" ? (
+            <span className="chip" style={{ background: "rgba(255,253,248,.94)" }} title="Model TTS niedostępny — czyta przeglądarka">
+              Głos zapasowy
+            </span>
+          ) : null}
           <span className="chip" style={{ background: "rgba(255,253,248,.94)" }}>
             ⏱ {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}
           </span>

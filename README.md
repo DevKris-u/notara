@@ -26,7 +26,9 @@ Data is created on first request in `.data/notara` (PGlite). Delete that folder 
 ### Whiteboard AI (`/whiteboard`)
 - Type any topic; the planner picks one of 19 authored topics or builds a generic lesson.
 - Every step is drawn on its own area of an infinite board; the camera follows the current step and keeps earlier steps visible.
-- Narration is synced with drawing (`SpeechSynthesis`, `pl-PL`). Pause stops the voice and drawing; mute keeps drawing.
+- The model writes words, local code draws: `figure` (30 hand-drawn illustrations), `chart` (bar/line/pie/area), `flow`, `table`, `venn`, `timeline`, `speech` and `formula` layouts. Each step gets a different composition, chosen from the content — a water drop, a cell, a molecule, a timeline of epochs, a quote bubble with a character.
+- Drawing follows the narrator sentence by sentence: the diagram appears with the first explanation, each point lands when it is spoken, and concrete nouns get a small pictogram next to the point (water → drop, light → sun, energy → bolt).
+- Narration is synthesised locally with Supertonic (see below). Pause stops the voice and drawing; mute keeps drawing.
 - Pan/zoom, `Śledź` to snap back, step list, speed control, PDF export (print stylesheet), restart.
 - Follow-up questions extend the same board with two new steps.
 - Free plan: 2 lessons per 5 days. Pro/Max: unlimited.
@@ -64,13 +66,27 @@ src/
     points.ts         plans, quotas, XP, streak, notifications, leaderboard
     ai/             NVIDIA NIM client + tutors: chat, lessons, quizzes, summaries (server only)
     local.ts        deterministic persona-aware chat replies + extractive summaries (fallback)
-    lesson/           topic library, geometry/math/science/human builders, canvas renderer
+    lesson/           topic library, geometry/math/science/human builders, figures, canvas renderer
+    tts/              Supertonic ONNX narrator (server) + browser clip client
 supabase/             hosted-Postgres migration + RLS notes
 ```
 
 **Why PGlite?** It is real Postgres compiled to WASM, so SQL stays portable: the same tables, `jsonb` columns, `text[]` tags and interval arithmetic work on Supabase. `supabase/migrations/0001_init.sql` adds `auth.users` linkage, `gen_random_uuid()` defaults and RLS policies for deployment.
 
-**Why a local lesson engine?** Lessons must be instant, offline, free and deterministic. `src/lib/lesson/*` composes typed canvas ops (`text`, `line`, `arrow`, `poly`, `func`, `axes`, …) with hand-drawn wobble; `BoardPlayer` animates them and speaks the narration.
+**Why a local lesson engine?** Lessons must be instant, offline, free and deterministic. `src/lib/lesson/*` composes typed canvas ops (`text`, `line`, `arrow`, `poly`, `figure`, `chart`, `flow`, `table`, `venn`, `timeline`, `speech`, …) with hand-drawn wobble; `BoardPlayer` animates them on the narration's clock: each op carries an `at` fraction derived from the sentence that explains it, so the picture is drawn while the narrator talks about it.
+
+## Narrator (Supertonic)
+
+Speech is generated on the server by `finestcrtn/supertonic-3-int8` running on `onnxruntime-node` (44.1 kHz, Polish voice, no cloud call).
+
+```bash
+npm run tts:prepare   # one-off download + SHA-256 check into .data/models/supertonic-3-int8
+```
+
+- Models live in `.data/models/supertonic-3-int8/` (`tts.json`, four `*.int8.onnx`, `voice.bin`, `unicode_indexer.bin`); network access is only needed for that first download.
+- `POST /api/tts` synthesises one step per request; WAVs are cached in `.data/tts/` keyed by text + voice + speed.
+- Pacing is deterministic (`15 token/s` at `1×`), so the drawing and the voice cannot drift apart. Playback speed is applied by the audio element, the board clock follows `audio.currentTime`.
+- If the model is missing, the player falls back to the browser's Polish `SpeechSynthesis` — never both at once.
 
 ## Scripts
 
